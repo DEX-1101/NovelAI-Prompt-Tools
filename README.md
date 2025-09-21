@@ -1,10 +1,16 @@
 # Features
 
-### ➡️ Weight Adjustments – Increase or decrease weights quickly with hotkeys.
+ ➡️ Weight Adjustments – Increase or decrease weights quickly with hotkeys.
 
-### ➡️ Tag Autocomplete – Suggests common tags as you type (similar to stable diffusion one).
+ ➡️ Tag Autocomplete – Suggests common tags as you type (similar to stable diffusion one).
 
-### ➡️ Customize hotkey and weight number.
+ 
+ 
+![weight_prompt](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/weight.gif)
+
+➡️ Customize hotkey and weight number.
+![setting page](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/setting.gif)
+
 
 # How to Use
 
