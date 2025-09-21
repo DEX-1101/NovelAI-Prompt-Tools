@@ -80,7 +80,7 @@
   /* ---------------------- TAG SUGGESTER CORE ---------------------- */
   /* ================================================================================= */
 
-    const TAG_DATA_URL = 'https://raw.githubusercontent.com/DominikDoom/a1111-sd-webui-tagcomplete/refs/heads/main/tags/danbooru_e621_merged.csv';
+    const TAG_DATA_URL = 'https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/danbooru2026.csv';
     let allTags = [];
     let aliasMap = new Map();
     let autocompleteContext = null; // To store position of tag being autocompleted
