@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         NovelAI Prompt Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.9.6
 // @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting more easieral-time tag suggester. Toggle suggester in settings. Shows a welcome message on first install.
 // @match        https://novelai.net/image*
 // @grant        GM_xmlhttpRequest
@@ -84,6 +84,7 @@
     let allTags = [];
     let aliasMap = new Map();
     let autocompleteContext = null; // To store position of tag being autocompleted
+    let isAdjustingWeight = false; // Flag to prevent suggestions during weight adjustment
 
     function parseCsvLine(line) {
         const regex = /(".*?"|[^",]+)(?=\s*,|\s*$)/g;
@@ -147,8 +148,13 @@
         const isCE = textArea.isContentEditable;
         const text = isCE ? textArea.textContent : textArea.value;
         const sel = window.getSelection();
-        if (isCE && sel.rangeCount === 0) return; // Exit if no selection in contentEditable
-        const cursorPos = isCE ? sel.getRangeAt(0).startOffset : textArea.selectionStart;
+        if (isCE && sel.rangeCount === 0) return;
+
+        // FIX: Use computeRangeOffsets for contentEditable elements to get the correct cursor position
+        // even when there are multiple child nodes (e.g., from syntax highlighting).
+        const [cursorPos, selectionEnd] = isCE
+            ? computeRangeOffsets(textArea, sel.getRangeAt(0))
+            : [textArea.selectionStart, textArea.selectionEnd];
 
         if (text.length === 0) {
             hideSuggestions();
@@ -156,35 +162,36 @@
             return;
         }
 
-        // Find the tag boundaries around the cursor. A "tag" is a comma-separated value.
-        let start = text.lastIndexOf(',', cursorPos - 1) + 1;
-        let end = text.indexOf(',', cursorPos);
-        if (end === -1) {
-            end = text.length;
+        let searchWord, contextStart, contextEnd;
+        const tagInfo = findTagByCaret(text, cursorPos);
+
+        if (tagInfo) {
+            searchWord = tagInfo.inner;
+            contextStart = tagInfo.tagStart;
+            contextEnd = tagInfo.tagEnd;
+        } else {
+            let groupStart = text.lastIndexOf(',', cursorPos - 1) + 1;
+            let groupEnd = text.indexOf(',', cursorPos);
+            if (groupEnd === -1) groupEnd = text.length;
+
+            while (/\s/.test(text[groupStart])) groupStart++;
+
+            contextStart = groupStart;
+            contextEnd = groupEnd;
+            searchWord = text.substring(groupStart, cursorPos).trim();
         }
 
-        // Don't autocomplete if cursor is right after a comma (starting a new tag) but nothing is typed yet.
-        if (cursorPos === start && text.substring(start, end).trim() === '') {
+        const tagword = searchWord.trim();
+        if (tagword.length === 0 || (!tagInfo && /^\d+(\.\d*)?$/.test(tagword))) {
             hideSuggestions();
             autocompleteContext = null;
             return;
         }
 
-        const tagword = text.substring(start, end).trim();
-
-        // No need to search if the "tag" is empty or just whitespace.
-        if (tagword.length === 0) {
-            hideSuggestions();
-            autocompleteContext = null;
-            return;
-        }
-
-        // Store the context for later replacement.
-        autocompleteContext = { start, end };
+        autocompleteContext = { start: contextStart, end: contextEnd };
 
         const suggestions = getSuggestions(tagword);
         currentSuggestions = suggestions;
-
         if (suggestions.length > 0) {
             showSuggestions(suggestions, textArea, tagword);
         } else {
@@ -273,27 +280,27 @@
         const isCE = activeInput.isContentEditable;
         const text = isCE ? activeInput.textContent : activeInput.value;
         const { start, end } = autocompleteContext;
-
         const textToInsert = suggestion.text.replace(/_/g, ' ');
-
-        const beforeText = text.substring(0, start);
-        const afterText = text.substring(end);
-
-        // Preserve any leading whitespace from the original chunk.
         const originalChunk = text.substring(start, end);
-        const leadingWhitespace = (originalChunk.match(/^\s*/) || [''])[0];
 
-        // Determine what to add after the inserted tag.
-        let trailingText = '';
-        // If the text following the chunk doesn't start with a comma,
-        // it means we were at the end of the list, so we add a comma and space for easy chaining.
-        if (!afterText.trim().startsWith(',')) {
-            trailingText = ', ';
+        let newValue, newCursorPos;
+        const tagInfo = findTagByCaret(text, start + 1);
+
+        if (tagInfo && tagInfo.tagStart === start && tagInfo.tagEnd === end) {
+            const newTag = formatTag(tagInfo.weight, textToInsert);
+            newValue = text.substring(0, start) + newTag + text.substring(end);
+            newCursorPos = start + newTag.length;
+        } else {
+            const beforeText = text.substring(0, start);
+            const afterText = text.substring(end);
+            const leadingWhitespace = (originalChunk.match(/^\s*/) || [''])[0];
+            let trailingText = '';
+            if (!afterText.trim().startsWith(',')) {
+                trailingText = ', ';
+            }
+            newValue = beforeText + leadingWhitespace + textToInsert + trailingText + afterText;
+            newCursorPos = (beforeText + leadingWhitespace + textToInsert + trailingText).length;
         }
-
-        const newValue = beforeText + leadingWhitespace + textToInsert + trailingText + afterText;
-        const newCursorPos = (beforeText + leadingWhitespace + textToInsert + trailingText).length;
-
 
         if (isCE) {
             activeInput.textContent = newValue;
@@ -315,7 +322,7 @@
         activeInput.dispatchEvent(new Event('input', { bubbles: true }));
 
         hideSuggestions();
-        autocompleteContext = null; // Reset context
+        autocompleteContext = null;
     }
 
     function updateHighlight() {
@@ -373,7 +380,7 @@
   function findTagByCaret(text, index) {
     TAG_RE.lastIndex = 0; let m;
     while ((m = TAG_RE.exec(text)) !== null) {
-      if (index >= m.index && index <= TAG_RE.lastIndex) {
+      if (index > m.index && index < TAG_RE.lastIndex) { // Use > and < to be strictly inside
         return { tagStart: m.index, tagEnd: TAG_RE.lastIndex, weight: parseFloat(m[1]), inner: m[3] };
       }
     }
@@ -448,8 +455,9 @@
     const { newText, caret } = adjustString(el.value, start, end, increase);
     if (newText === el.value) return;
     el.value = newText;
-    el.setSelectionRange(start, caret);
+    el.setSelectionRange(caret, caret);
     el.scrollTop = prevScroll;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   function adjustInContentEditable(el, increase) {
@@ -461,12 +469,22 @@
     if (newText === text) return;
     el.innerText = newText;
     setCaretByOffset(el, caret);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 
   function updateWeight(increase) {
+    isAdjustingWeight = true; // Set flag to disable suggestions temporarily
+
+    // Immediately hide any active suggestions and reset the context.
+    hideSuggestions();
+    autocompleteContext = null;
+
     const el = getEditableElement(); if (!el) return;
     if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text')) adjustInPlain(el, increase);
     else if (el.isContentEditable) adjustInContentEditable(el, increase);
+
+    // Reset the flag after a short delay to allow the input event to process.
+    setTimeout(() => { isAdjustingWeight = false; }, 50);
   }
 
   /* ---------------------- HOTKEYS & EVENT LISTENERS ---------------------- */
@@ -519,6 +537,7 @@
   }, true); // Use CAPTURE phase to handle keys before the site's own listeners
 
    document.addEventListener('input', (event) => {
+        if (isAdjustingWeight) return;
         const target = event.target;
         if (CONFIG.enableTagSuggester && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) {
             activeInput = target;
@@ -941,3 +960,4 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
 
 })();
+
