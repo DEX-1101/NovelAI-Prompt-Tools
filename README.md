@@ -1,0 +1,19 @@
+# Features
+
+### ➡️ Weight Adjustments – Increase or decrease weights quickly with hotkeys.
+
+### ➡️ Tag Autocomplete – Suggests common tags as you type (similar to stable diffusion one).
+
+### ➡️ Customize hotkey and weight number.
+
+# How to Use
+
+1. Install [Tampermonkey](https://www.tampermonkey.net/).
+
+  
+2. Click [![Install Userscript](https://img.shields.io/badge/Install%20Userscript-0078D7?style=for-the-badge&logo=javascript&logoColor=white)](https://github.com/DEX-1101/NovelAI-Prompt-Tools/raw/refs/heads/main/NovelAI_Prompt_Tools.user.js) or download the `.user.js` file and paste the entire code on the Tampermonkey,
+
+
+3. Open the NovelAI image generation page and the pop up message should appear if already installed.
+
+<b>Note :<b/> Script might ask some permission to fetch the tagautocomplete data, so allow it. 
