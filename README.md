@@ -22,4 +22,6 @@
 
 3. Open the NovelAI image generation page and the pop up message should appear if already installed.
 
-<b>Note :<b/> Script might ask some permission to fetch the tagautocomplete data, so allow it. 
+<b>Note :
+1. <b/> Script might ask some permission to fetch the tagautocomplete data, so allow it.
+2. Script tested on Chrome and Mozilla. 
