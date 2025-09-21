@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      3.9.6
 // @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting more easieral-time tag suggester. Toggle suggester in settings. Shows a welcome message on first install.
-// @match        https://novelai.net/image*
+// @match        https://novelai.net/*
 // @grant        GM_xmlhttpRequest
 // ==/UserScript==
 
