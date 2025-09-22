@@ -1,21 +1,28 @@
 // ==UserScript==
 // @name         NovelAI Prompt Tools
 // @namespace    http://tampermonkey.net/
-// @version      3.9.6
-// @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting more easieral-time tag suggester. Toggle suggester in settings. Shows a welcome message on first install.
+// @version      4.0.1
+// @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting more easier with a real-time tag suggestion.
+// @author       x1101
 // @match        https://novelai.net/*
 // @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // ==/UserScript==
 
 (function () {
   'use strict';
 
-  /* ---------------------- STORAGE (Weight Wrapper) ---------------------- */
-  const LS_KEY = 'nwpw_config_v3'; // v3 includes suggester toggle
+  /* ---------------------- STORAGE (Weight Wrapper & Cache) ---------------------- */
+  const LS_KEY = 'nwpw_config_v3';
   const POS_KEY = 'nwpw_panel_pos';
-  const FIRST_RUN_KEY = 'nwpw_first_run_v3.9'; // Updated for new popup logic
+  const FIRST_RUN_KEY = 'nwpw_first_run_v3.9';
   const LEGACY_KEY_V1 = 'nwpw_config_v1';
   const LEGACY_KEY_V2 = 'nwpw_config_v2';
+  // --- NEW --- Keys for caching tag data
+  const TAG_CACHE_KEY = 'nwpw_tag_data_cache';
+  const ALIAS_CACHE_KEY = 'nwpw_alias_data_cache';
 
 
   const DEFAULTS = {
@@ -25,19 +32,14 @@
     increaseHotkey: { key: 'ArrowUp',   ctrl: true,  alt: false, shift: false },
     decreaseHotkey: { key: 'ArrowDown', ctrl: true,  alt: false, shift: false },
     toggleUIHotkey: { key: ';',         ctrl: true,  alt: false, shift: false }, // Ctrl+;
-    enableTagSuggester: false, // Feature is disabled by default
+    enableTagSuggester: false,
   };
 
   function migrateLegacy() {
-    // Check for v2 first
     let raw = localStorage.getItem(LEGACY_KEY_V2);
     if(raw) {
-        try {
-            const old = JSON.parse(raw);
-            return { ...DEFAULTS, ...old }; // Carry over old settings
-        } catch {}
+        try { const old = JSON.parse(raw); return { ...DEFAULTS, ...old }; } catch {}
     }
-    // Then check for v1
     raw = localStorage.getItem(LEGACY_KEY_V1);
     if (raw) {
       try {
@@ -63,7 +65,6 @@
       const migrated = migrateLegacy();
       if (migrated) {
         localStorage.setItem(LS_KEY, JSON.stringify(migrated));
-        // Clean up old keys
         localStorage.removeItem(LEGACY_KEY_V1);
         localStorage.removeItem(LEGACY_KEY_V2);
         return migrated;
@@ -77,22 +78,43 @@
 
 
   /* ================================================================================= */
-  /* ---------------------- TAG SUGGESTER CORE ---------------------- */
+  /* ---------------------- TAG SUGGESTER CORE (with Caching) ---------------------- */
   /* ================================================================================= */
 
     const TAG_DATA_URL = 'https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/danbooru2026.csv';
     let allTags = [];
     let aliasMap = new Map();
-    let autocompleteContext = null; // To store position of tag being autocompleted
-    let isAdjustingWeight = false; // Flag to prevent suggestions during weight adjustment
+    let autocompleteContext = null;
+    let isAdjustingWeight = false;
 
     function parseCsvLine(line) {
         const regex = /(".*?"|[^",]+)(?=\s*,|\s*$)/g;
         const matches = line.match(regex) || [];
         return matches.map(field => field.replace(/^"|"$/g, '').trim());
     }
+    // --- MODIFIED --- This function now uses GM_storage to avoid size limits and reports status to the UI
+    async function loadTags() {
+        updateStatus('Loading tags...', false, true);
+        try {
+            const cachedTags = await GM_getValue(TAG_CACHE_KEY);
+            const cachedAliasesArray = await GM_getValue(ALIAS_CACHE_KEY);
 
-    function fetchTags() {
+            // Try to load from GM storage first
+            if (cachedTags && cachedAliasesArray) {
+                allTags = cachedTags;
+                aliasMap = new Map(cachedAliasesArray); // Reconstruct Map from array
+                updateStatus(`Loaded ${allTags.length} tags from cache.`);
+                return; // Success, no need to fetch
+            }
+        } catch (e) {
+            console.error('[Tag Suggester] Failed to parse cached tags. Clearing cache and fetching new data.', e);
+            updateStatus('Cache error. Refetching tags...', true);
+            await GM_deleteValue(TAG_CACHE_KEY);
+            await GM_deleteValue(ALIAS_CACHE_KEY);
+        }
+
+
+        updateStatus('Fetching tags from GitHub...', false, true);
         GM_xmlhttpRequest({
             method: 'GET',
             url: TAG_DATA_URL,
@@ -130,9 +152,16 @@
                 for (const tagText of mainTagTexts) {
                     if (aliasMap.has(tagText)) aliasMap.delete(tagText);
                 }
-                console.log(`[Tag Suggester] Loaded ${allTags.length} tags and ${aliasMap.size} aliases.`);
+
+                // --- MODIFIED --- Save the fetched data to GM storage
+                GM_setValue(TAG_CACHE_KEY, allTags);
+                GM_setValue(ALIAS_CACHE_KEY, Array.from(aliasMap.entries()));
+                updateStatus(`Loaded and cached ${allTags.length} tags.`);
             },
-            onerror: function(error) { console.error('[Tag Suggester] Failed to fetch tags:', error); }
+            onerror: function(error) {
+                console.error('[Tag Suggester] Failed to fetch tags:', error);
+                updateStatus('Failed to fetch tags. Check console.', true);
+            }
         });
     }
 
@@ -150,8 +179,6 @@
         const sel = window.getSelection();
         if (isCE && sel.rangeCount === 0) return;
 
-        // FIX: Use computeRangeOffsets for contentEditable elements to get the correct cursor position
-        // even when there are multiple child nodes (e.g., from syntax highlighting).
         const [cursorPos, selectionEnd] = isCE
             ? computeRangeOffsets(textArea, sel.getRangeAt(0))
             : [textArea.selectionStart, textArea.selectionEnd];
@@ -380,7 +407,7 @@
   function findTagByCaret(text, index) {
     TAG_RE.lastIndex = 0; let m;
     while ((m = TAG_RE.exec(text)) !== null) {
-      if (index > m.index && index < TAG_RE.lastIndex) { // Use > and < to be strictly inside
+      if (index > m.index && index < TAG_RE.lastIndex) {
         return { tagStart: m.index, tagEnd: TAG_RE.lastIndex, weight: parseFloat(m[1]), inner: m[3] };
       }
     }
@@ -473,9 +500,7 @@
   }
 
   function updateWeight(increase) {
-    isAdjustingWeight = true; // Set flag to disable suggestions temporarily
-
-    // Immediately hide any active suggestions and reset the context.
+    isAdjustingWeight = true;
     hideSuggestions();
     autocompleteContext = null;
 
@@ -483,7 +508,6 @@
     if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text')) adjustInPlain(el, increase);
     else if (el.isContentEditable) adjustInContentEditable(el, increase);
 
-    // Reset the flag after a short delay to allow the input event to process.
     setTimeout(() => { isAdjustingWeight = false; }, 50);
   }
 
@@ -494,7 +518,6 @@
   }
 
   document.addEventListener('keydown', function (e) {
-    // --- MERGED CAPTURE & HOTKEY LOGIC ---
     if (isCapturing) {
         e.preventDefault();
         e.stopPropagation();
@@ -534,7 +557,7 @@
     if (matchesHotkey(e, CONFIG.toggleUIHotkey)) { e.preventDefault(); toggleUI(); return; }
     if (matchesHotkey(e, CONFIG.increaseHotkey)) { e.preventDefault(); updateWeight(true); return; }
     if (matchesHotkey(e, CONFIG.decreaseHotkey)) { e.preventDefault(); updateWeight(false); return; }
-  }, true); // Use CAPTURE phase to handle keys before the site's own listeners
+  }, true);
 
    document.addEventListener('input', (event) => {
         if (isAdjustingWeight) return;
@@ -557,6 +580,24 @@
   /* ---------------------- UI (Panel, Buttons, etc.) ---------------------- */
   let panel, gearBtn, overlayBtn, tooltipEl, toastEl, captureNotice, captureTimer = null;
 
+  // --- NEW --- Function to display status messages in the UI
+  function updateStatus(message, isError = false, isLoading = false) {
+    const statusBar = document.getElementById('nwpw-status-bar');
+    if (statusBar) {
+        let content = '';
+        if (isLoading) {
+            content = `<div style="display:flex; align-items:center; gap: 6px;">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="animation: nwpw-spin 1s linear infinite;"><path d="M8 1.5A6.5 6.5 0 1 0 8 14.5A6.5 6.5 0 1 0 8 1.5Z" stroke="currentColor" stroke-opacity="0.25" stroke-width="3"/><path d="M8 1.5A6.5 6.5 0 1 1 1.5 8" stroke="currentColor" stroke-width="3"/></svg>
+                <span>${message}</span>
+            </div>`;
+        } else {
+            content = `<span>${message}</span>`;
+        }
+        statusBar.innerHTML = content;
+        statusBar.style.color = isError ? '#ef4444' : 'var(--muted)';
+    }
+  }
+
   function injectStyles() {
     if (document.getElementById('nwpw-style')) return;
     const css = `
@@ -566,6 +607,7 @@
         --shadow:0 24px 60px rgba(0,0,0,.55), 0 8px 20px rgba(0,0,0,.35);
       }
       @keyframes nwpw-pop { from { opacity:0; transform: translateY(8px) scale(.98); } to { opacity:1; transform: translateY(0) scale(1); } }
+      @keyframes nwpw-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
       #nwpw-gear, #nwpw-overlay-btn { z-index: 2147483645; }
       #nwpw-gear {
         position: fixed; right: 18px; bottom: 18px; width: auto; height: auto; padding: 8px 14px;
@@ -603,7 +645,7 @@
         background: #0a1220; color: var(--text); outline: none; transition: border-color .15s ease, box-shadow .15s ease;
       }
       #nwpw-panel input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(34,211,238,.15); }
-      #nwpw-panel .btns { display:flex; gap:10px; justify-content: space-between; margin-top: 12px; }
+      #nwpw-panel .btns { display:flex; gap:10px; justify-content: space-between; align-items: center; margin-top: 12px; }
       #nwpw-panel .btn-group { display:flex; gap:10px; }
       #nwpw-panel button {
         padding: 7px 12px; border-radius: 2px; border: 1px solid var(--border);
@@ -623,7 +665,6 @@
       .inline { display:flex; gap:8px; align-items:center; }
       .hint { color: var(--muted); font-size: 11px; }
       .shortcut-note { font-size: 11px; color: var(--muted); margin-top: 4px; }
-      /* Suggester CSS */
       @keyframes slideIn { from { transform: translateX(-10px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
       @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(-10px); opacity: 0; } }
       .slide-in { animation: slideIn 0.2s ease-out forwards; }
@@ -634,8 +675,6 @@
       #tag-suggestions-container::-webkit-scrollbar-thumb { background-color: #1e40af; border-radius: 4px; }
       #tag-suggestions-container::-webkit-scrollbar-thumb:hover { background-color: #3b82f6; }
       .ac-post-count { color: #888; font-size: 0.9em; margin-left: auto; padding-left: 15px; }
-
-      /* Toggle Switch CSS */
       .nwpw-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
       .nwpw-switch input { opacity: 0; width: 0; height: 0; }
       .nwpw-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #1f2a3c; transition: .4s; border-radius: 24px; }
@@ -643,41 +682,22 @@
       input:checked + .nwpw-slider { background-color: #4f46e5; }
       input:focus + .nwpw-slider { box-shadow: 0 0 1px #4f46e5; }
       input:checked + .nwpw-slider:before { transform: translateX(20px); }
-
-      /* --- NEW --- First Run Popup & Animation Styles --- */
       @keyframes nwpw-glow {
         0%, 100% { box-shadow: 0 0 5px #22d3ee, 0 0 10px #22d3ee, 0 0 15px #4f46e5; }
         50% { box-shadow: 0 0 15px #4f46e5, 0 0 25px #4f46e5, 0 0 35px #22d3ee; }
       }
       @keyframes nwpw-bounce {
-        0%, 20%, 50%, 80%, 100% { transform: translateY(0); }
-        40% { transform: translateY(-10px); }
-        60% { transform: translateY(-5px); }
+        0%, 20%, 50%, 80%, 100% { transform: translateY(0); } 40% { transform: translateY(-10px); } 60% { transform: translateY(-5px); }
       }
-      .nwpw-attention {
-        animation: nwpw-glow 2.5s infinite, nwpw-bounce 2s infinite;
-        border-color: var(--accent-2) !important;
-      }
-      #nwpw-welcome-popup {
-        position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
-        background: var(--card); color: var(--text); border: 1px solid var(--border);
-        border-radius: 4px; padding: 24px; box-shadow: var(--shadow);
-        z-index: 2147483647; text-align: center; animation: nwpw-pop .2s ease-out;
-      }
+      .nwpw-attention { animation: nwpw-glow 2.5s infinite, nwpw-bounce 2s infinite; border-color: var(--accent-2) !important; }
+      #nwpw-welcome-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 24px; box-shadow: var(--shadow); z-index: 2147483647; text-align: center; animation: nwpw-pop .2s ease-out; }
       #nwpw-welcome-popup h3 { margin: 0 0 12px; font-size: 18px; }
       #nwpw-welcome-popup p { margin: 0 0 20px; color: var(--muted); max-width: 350px; }
-      #nwpw-welcome-popup .popup-btns button {
-        padding: 7px 12px; border-radius: 2px; border: 1px solid var(--border);
-        background:#0e1626; color:var(--text); cursor:pointer; transition: transform .12s ease, border-color .15s ease, background .15s ease;
-        margin: 0 5px;
-      }
+      #nwpw-welcome-popup .popup-btns button { padding: 7px 12px; border-radius: 2px; border: 1px solid var(--border); background:#0e1626; color:var(--text); cursor:pointer; transition: transform .12s ease, border-color .15s ease, background .15s ease; margin: 0 5px; }
       #nwpw-welcome-popup .popup-btns button:hover { transform: translateY(-1px); border-color:#334155; background:#101b30; }
       #nwpw-welcome-popup .popup-btns button.primary { background: linear-gradient(180deg, #3b82f6, #2563eb); border-color: #1d4ed8; }
       #nwpw-welcome-popup .popup-btns button.primary:hover { background: linear-gradient(180deg, #60a5fa, #3b82f6); border-color:#2563eb; }
-      #nwpw-github-link {
-        display: inline-flex; align-items: center; gap: 8px; margin-top: 16px;
-        text-decoration: none; color: var(--muted); transition: color .2s ease;
-      }
+      #nwpw-github-link { display: inline-flex; align-items: center; gap: 8px; margin-top: 16px; text-decoration: none; color: var(--muted); transition: color .2s ease; }
       #nwpw-github-link:hover { color: var(--text); }
     `;
     const style = document.createElement('style');
@@ -686,7 +706,6 @@
     document.head.appendChild(style);
   }
 
-  // --- NEW --- Function to show the first-run popup
   function showFirstRunPopup() {
     const popup = document.createElement('div');
     popup.id = 'nwpw-welcome-popup';
@@ -704,14 +723,8 @@
       </a>
     `;
     document.body.appendChild(popup);
-
-    const closePopup = () => {
-        gearBtn.classList.remove('nwpw-attention');
-        popup.remove();
-    };
-
+    const closePopup = () => { gearBtn.classList.remove('nwpw-attention'); popup.remove(); };
     popup.querySelector('#nwpw-popup-ok').addEventListener('click', closePopup);
-
     gearBtn.classList.add('nwpw-attention');
   }
 
@@ -744,7 +757,7 @@
     toastEl.style.zIndex = '2147483647';
     document.body.appendChild(toastEl);
   }
-  function showToast(msg, ms = 1400) {
+  function showToast(msg, ms = 2000) {
     ensureToast(); toastEl.textContent = msg; toastEl.style.display = 'block';
     setTimeout(() => { toastEl.style.display = 'none'; }, ms);
   }
@@ -787,16 +800,6 @@
     document.body.appendChild(gearBtn);
     bindTooltip(gearBtn, 'Open Settings. (Default shortcut: Ctrl+;)');
   }
-  function createOverlayButton() {
-    if (document.getElementById('nwpw-overlay-btn')) return;
-    overlayBtn = document.createElement('button');
-    overlayBtn.id = 'nwpw-overlay-btn';
-    overlayBtn.type = 'button';
-    overlayBtn.textContent = 'Settings';
-    overlayBtn.addEventListener('click', toggleUI, { passive: true });
-    document.body.appendChild(overlayBtn);
-    bindTooltip(overlayBtn, 'Open the Prompt Weight Wrapper settings panel.');
-  }
 
   function createUI() {
     if (document.getElementById('nwpw-panel')) return;
@@ -817,7 +820,7 @@
 
       <div class="row">
         <div>
-          <label data-tip="Enable or disable real-time tag suggestions while typing.">Real-time Tag Suggester</label>
+          <label data-tip="Enable or disable real-time tag suggestions while typing.">Real-time Tag Suggestion</label>
           <label class="nwpw-switch">
               <input id="nwpw-suggester-toggle" type="checkbox">
               <span class="nwpw-slider"></span>
@@ -860,13 +863,16 @@
         </div>
       </div>
 
-
       <div class="btns">
-        <button id="nwpw-reset" data-tip="Reset all settings to their original values.">Reset</button>
+        <div class="btn-group">
+            <button id="nwpw-reset" data-tip="Reset all settings to their original values.">Reset Settings</button>
+            <button id="nwpw-clear-tags" data-tip="Clear the cached tag data and fetch the latest version on the next load.">Clear Tag Cache</button>
+        </div>
         <button id="nwpw-save" class="primary" data-tip="Apply and save your changes.">Save</button>
       </div>
-       <div style="margin-top:12px;text-align:right;font-size:12px;color:var(--muted);">
-        Made by <a href="https://github.com/DEX-1101/NovelAI-Prompt-Weight-Wrapper" target="_blank" data-tip="give a ⭐ star on github if you find this tool useful :)" style="color:#22d3ee;text-decoration:none;">x1101</a>
+      <div class="footer" style="display:flex; justify-content: space-between; align-items: center; margin-top:12px; font-size:12px; color:var(--muted);">
+        <span id="nwpw-status-bar" style="font-size: 11px; flex-grow: 1; text-align: left; min-height: 16px;"></span>
+        <span>Made by <a href="https://github.com/DEX-1101/NovelAI-Prompt-Weight-Wrapper" target="_blank" data-tip="give a ⭐ star on github if you find this tool useful :)" style="color:#22d3ee;text-decoration:none;">x1101</a></span>
       </div>
     `;
     document.body.appendChild(panel);
@@ -910,6 +916,14 @@
       CONFIG = { ...DEFAULTS }; saveConfig(CONFIG);
       panel.remove(); panel = null; createUI(); openUI(); showToast('Defaults restored');
     });
+
+    // --- MODIFIED --- Event listener for clearing tag cache from GM storage
+    panel.querySelector('#nwpw-clear-tags').addEventListener('click', async () => {
+        await GM_deleteValue(TAG_CACHE_KEY);
+        await GM_deleteValue(ALIAS_CACHE_KEY);
+        showToast('Tag cache cleared. Reload the page to fetch new tags.');
+    });
+
     panel.querySelector('#nwpw-save').addEventListener('click', () => {
       CONFIG.increaseHotkey = parseCombo(incEl.value, DEFAULTS.increaseHotkey);
       CONFIG.decreaseHotkey = parseCombo(decEl.value, DEFAULTS.decreaseHotkey);
@@ -944,17 +958,16 @@
   function init() {
     injectStyles();
     createGearButton();
-    createUI(); // Create but don't show
-    fetchTags(); // Fetch tag data for suggester
+    createUI();
+    loadTags(); // --- MODIFIED --- Call the new caching-aware function
     document.body.appendChild(suggestionContainer);
 
-    // --- NEW --- Check if it's the first run
     const isFirstRun = localStorage.getItem(FIRST_RUN_KEY) === null;
     if (isFirstRun) {
         setTimeout(() => {
             showFirstRunPopup();
             localStorage.setItem(FIRST_RUN_KEY, 'false');
-        }, 1000); // Delay a bit to ensure the page is fully loaded
+        }, 1000);
     }
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
