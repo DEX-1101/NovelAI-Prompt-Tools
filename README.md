@@ -1,28 +1,42 @@
-# Features
+# 🎨 NovelAI Prompt Tools
 
- ➡️ Weight Adjustments – Increase or decrease weights quickly with hotkeys.
+A simple yet powerful Tampermonkey userscript designed to supercharge your prompting workflow on NovelAI. This script adds essential features like hotkey-based weight adjustments and intelligent tag autocompletion.
 
- ➡️ Tag Autocomplete – Suggests common tags as you type (similar to stable diffusion one).
+---
 
- 
- 
-![weight_prompt](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/weight.gif)
+## ✨ Features
 
-➡️ Customize hotkey and weight number.
-![setting page](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/setting.gif)
+-   **🚀 Hotkey Weight Adjustments:** Quickly increase or decrease the emphasis of your tags. Select a word and press a hotkey to wrap it in `1.3::1girl::`, saving you time and effort.
 
+    ![Adjusting prompt weights with hotkeys](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/weight.gif)
 
-# How to Use
+-   **🧠 Smart Tag Autocomplete:** Get instant suggestions for danbooru tags as you type (with Latest Artist and Character Tags, both NSFW and SFW).
 
-1. Install [Tampermonkey](https://www.tampermonkey.net/).
+-   **⚙️ Fully Customizable:** Easily change the hotkeys and weight adjustment values through a clean and simple settings menu to perfectly match your workflow.
 
-  
-2. Click [![Install Userscript](https://img.shields.io/badge/Install%20Userscript-0078D7?style=for-the-badge&logo=javascript&logoColor=white)](https://github.com/DEX-1101/NovelAI-Prompt-Tools/raw/refs/heads/main/NovelAI_Prompt_Tools.user.js) or download the `.user.js` file and paste the entire code on the Tampermonkey,
+    ![Customizing hotkeys and settings](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/setting.gif)
 
+---
 
-3. Open the NovelAI website and the pop up message should appear if already installed.
+## 🛠️ Installation Guide
 
-<b>Note :
-1. <b/> Script might ask some permission to fetch the tagautocomplete data, so allow it.
-2. Script already tested on Chrome, Mozilla and Brave and working fine.
-3. To Update the script, just click Tampermonkey icon extension > Dashboard > Click the script name > File > Check for updates.
+Getting started is easy! Just follow these three steps.
+
+1.  **Install a Userscript Manager**
+    -   You need an extension to run this script. We recommend [**Tampermonkey**](https://www.tampermonkey.net/).
+
+2.  **Install the Script**
+    -   Click the button below to install the NovelAI Prompt Tools script directly.
+
+        [![Install Userscript](https://img.shields.io/badge/Install%20Userscript-0078D7?style=for-the-badge&logo=javascript&logoColor=white)](https://github.com/DEX-1101/NovelAI-Prompt-Tools/raw/refs/heads/main/NovelAI_Prompt_Tools.user.js)
+
+3.  **All Set!**
+    -   Open or refresh the [NovelAI Image Generation](https://novelai.net/image) page. The script will be active automatically!
+
+---
+
+## 📌 Important Notes
+
+-   **Permissions:** The first time you use the script, it may request permission to fetch data from an external source. This is **required** for the tag autocomplete feature to work. Please approve the request.
+-   **Browser Compatibility:** This script has been tested and works perfectly with **Chrome**, **Firefox**, and **Brave**.
+-   **How to Update:** To ensure you have the latest version, go to your **Tampermonkey Dashboard**, click on the script name, and use the built-in update checker `(File > Check Update).`
