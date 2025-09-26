@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         NovelAI Prompt Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.0.1
+// @version      4.0.5
 // @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting more easier with a real-time tag suggestion.
-// @author       x1101
+// @author       x1101 (UI updated by your request)
 // @match        https://novelai.net/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -251,48 +251,80 @@
                  }
              }
         }
-        return results.slice(0, 20);
+        return results.slice(0, 10); // Changed to 10 to fit the new UI better
     }
 
-    function showSuggestions(suggestions, inputElement, tagword) {
-        suggestionContainer.innerHTML = '';
-        const tagsCount = document.createElement('div');
-        tagsCount.textContent = `Found ${suggestions.length} matches for "${tagword}"`;
-        tagsCount.style.cssText = `padding: 8px 12px; color: #888; font-size: 0.8em; border-bottom: 1px solid #3a3a3a;`;
-        suggestionContainer.appendChild(tagsCount);
-        suggestions.forEach(suggestion => suggestionContainer.appendChild(createSuggestionItem(suggestion)));
+    // --- MODIFIED --- This function is completely revamped for the new UI
+    function showSuggestions(suggestions, inputElement) {
+        suggestionContainer.innerHTML = ''; // Clear previous suggestions
+
+        // Create header with only the close button
+        const header = document.createElement('div');
+        header.className = 'suggestion-header';
+        const closeBtn = document.createElement('button');
+        closeBtn.innerHTML = '✕';
+        closeBtn.onclick = hideSuggestions;
+        header.appendChild(closeBtn);
+        suggestionContainer.appendChild(header);
+
+        // Create grid for tags
+        const grid = document.createElement('div');
+        grid.className = 'suggestions-grid';
+        suggestions.forEach(suggestion => grid.appendChild(createSuggestionItem(suggestion)));
+        suggestionContainer.appendChild(grid);
+
+        // Positioning logic
         const rect = inputElement.getBoundingClientRect();
         suggestionContainer.style.left = `${rect.left + window.scrollX}px`;
         suggestionContainer.style.top = `${rect.bottom + window.scrollY + 5}px`;
-        suggestionContainer.style.width = `${rect.width}px`;
+        suggestionContainer.style.width = `max-content`; // Adjust width to content
+        suggestionContainer.style.minWidth = `${rect.width}px`;
         suggestionContainer.style.display = 'block';
         suggestionContainer.classList.remove('slide-out');
         suggestionContainer.classList.add('slide-in');
     }
 
+    // --- MODIFIED --- This function is completely revamped for the new UI
     function createSuggestionItem(suggestion) {
         const item = document.createElement('div');
         item.className = 'suggestion-item';
-        item.style.cssText = `padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #3a3a3a; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; justify-content: space-between; align-items: center;`;
+
         const textContainer = document.createElement('div');
+        textContainer.className = 'suggestion-text-container';
+
         const suggestionText = document.createElement('span');
         suggestionText.textContent = suggestion.isAlias ? suggestion.source : suggestion.text;
         textContainer.appendChild(suggestionText);
+
         if (suggestion.isAlias) {
             const notice = document.createElement('span');
             notice.textContent = ` → ${suggestion.text}`;
-            notice.style.cssText = `color: #3b82f6; font-size: 0.9em; margin-left: 10px; font-style: italic;`;
+            notice.className = 'suggestion-alias-notice';
             textContainer.appendChild(notice);
         }
-        const postCount = document.createElement('span');
-        postCount.className = 'ac-post-count';
-        postCount.textContent = `${(suggestion.count / 1000).toFixed(1)}k`;
+
+        const metaContainer = document.createElement('div');
+        metaContainer.className = 'suggestion-meta';
+
+        const countSpan = document.createElement('span');
+        countSpan.className = 'suggestion-count';
+        countSpan.textContent = `${(suggestion.count / 1000).toFixed(1)}k`;
+
+        metaContainer.appendChild(countSpan);
+
         item.appendChild(textContainer);
-        item.appendChild(postCount);
+        item.appendChild(metaContainer);
+
         item.onclick = (e) => { e.stopPropagation(); selectSuggestion(suggestion); };
-        item.onmouseover = () => { highlightedIndex = Array.from(suggestionContainer.children).indexOf(item) - 1; updateHighlight(); };
+        item.onmouseover = () => {
+             // Find the correct index in the grid
+            const gridItems = Array.from(suggestionContainer.querySelectorAll('.suggestion-item'));
+            highlightedIndex = gridItems.indexOf(item);
+            updateHighlight();
+        };
         return item;
     }
+
 
     function hideSuggestions() {
         if (suggestionContainer.style.display === 'none') return;
@@ -356,8 +388,13 @@
         const items = suggestionContainer.querySelectorAll('.suggestion-item');
         items.forEach((item, index) => {
             const isHighlighted = index === highlightedIndex;
-            item.style.backgroundColor = isHighlighted ? '#4a4a4a' : '';
-            if (isHighlighted) item.scrollIntoView({ block: 'nearest' });
+            // --- MODIFIED --- Use class for highlighting instead of direct style
+            if (isHighlighted) {
+                item.classList.add('highlighted');
+                item.scrollIntoView({ block: 'nearest' });
+            } else {
+                item.classList.remove('highlighted');
+            }
         });
     }
 
@@ -539,19 +576,39 @@
     }
 
     if (suggestionContainer.style.display !== 'none') {
-        const keyActions = {
-            'ArrowDown': () => { highlightedIndex = (highlightedIndex + 1) % currentSuggestions.length; updateHighlight(); },
-            'ArrowUp': () => { highlightedIndex = (highlightedIndex - 1 + currentSuggestions.length) % currentSuggestions.length; updateHighlight(); },
-            'Enter': () => { if (highlightedIndex !== -1) selectSuggestion(currentSuggestions[highlightedIndex]); },
-            'Tab': () => { if (highlightedIndex !== -1) selectSuggestion(currentSuggestions[highlightedIndex]); },
-            'Escape': () => { hideSuggestions(); }
-        };
-        if (keyActions[e.key]) {
+        let preventDefault = true;
+        switch(e.key) {
+            case 'ArrowDown':
+                highlightedIndex = highlightedIndex === -1 ? 0 : Math.min(highlightedIndex + 2, currentSuggestions.length - 1);
+                break;
+            case 'ArrowUp':
+                if (highlightedIndex > -1) highlightedIndex = Math.max(highlightedIndex - 2, 0);
+                break;
+            case 'ArrowRight':
+                highlightedIndex = highlightedIndex === -1 ? 0 : Math.min(highlightedIndex + 1, currentSuggestions.length - 1);
+                break;
+            case 'ArrowLeft':
+                if (highlightedIndex > -1) highlightedIndex = Math.max(highlightedIndex - 1, 0);
+                break;
+            case 'Enter':
+            case 'Tab':
+                if (highlightedIndex !== -1) selectSuggestion(currentSuggestions[highlightedIndex]);
+                break;
+            case 'Escape':
+                hideSuggestions();
+                break;
+            default:
+                preventDefault = false;
+        }
+
+        if (preventDefault) {
             e.preventDefault();
             e.stopPropagation();
-            keyActions[e.key]();
-            return;
+            if (!['Enter', 'Tab', 'Escape'].includes(e.key)) {
+                updateHighlight();
+            }
         }
+        return;
     }
 
     if (matchesHotkey(e, CONFIG.toggleUIHotkey)) { e.preventDefault(); toggleUI(); return; }
@@ -669,12 +726,93 @@
       @keyframes slideOut { from { transform: translateX(0); opacity: 1; } to { transform: translateX(-10px); opacity: 0; } }
       .slide-in { animation: slideIn 0.2s ease-out forwards; }
       .slide-out { animation: slideOut 0.2s ease-in forwards; }
-      #tag-suggestions-container { position: absolute; z-index: 10000; background-color: #2c2c2c; border: 1px solid #444444; max-height: 200px; overflow-y: auto; box-shadow: 0 6px 12px rgba(0,0,0,0.4); display: none; border-radius: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; color: #f0f0f0; }
-      #tag-suggestions-container::-webkit-scrollbar { width: 8px; }
-      #tag-suggestions-container::-webkit-scrollbar-track { background: #2c2c2c; }
-      #tag-suggestions-container::-webkit-scrollbar-thumb { background-color: #1e40af; border-radius: 4px; }
-      #tag-suggestions-container::-webkit-scrollbar-thumb:hover { background-color: #3b82f6; }
-      .ac-post-count { color: #888; font-size: 0.9em; margin-left: auto; padding-left: 15px; }
+
+      /* --- MODIFIED --- All styles below are new or changed for the suggestion UI */
+      #tag-suggestions-container {
+        position: absolute; z-index: 10000;
+        background-color: #19202c;
+        border: 1px solid #333c4b;
+        box-shadow: 0 8px 16px rgba(0,0,0,0.3);
+        display: none;
+        border-radius: 2px;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        color: #e2e8f0;
+        padding: 8px;
+        overflow: hidden;
+      }
+      .suggestion-header {
+        display: flex;
+        justify-content: flex-end;
+        align-items: center;
+        padding: 0px 8px 8px 8px;
+        height: 24px;
+      }
+      .suggestion-header button {
+        background: none;
+        border: none;
+        color: #94a3b8;
+        font-size: 20px;
+        cursor: pointer;
+        line-height: 1;
+        padding: 0 4px;
+        transition: color 0.2s ease;
+      }
+      .suggestion-header button:hover {
+        color: #e2e8f0;
+      }
+      .suggestions-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .suggestion-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        background-color: #2a3346;
+        border: 1px solid #414a5d;
+        padding: 6px 10px;
+        border-radius: 2px;
+        cursor: pointer;
+        transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .suggestion-item:hover, .suggestion-item.highlighted {
+        background-color: #3b455c;
+        border-color: #555f75;
+        color: #fff;
+      }
+      .suggestion-text-container {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .suggestion-alias-notice {
+        color: #38bdf8;
+        font-size: 0.9em;
+        margin-left: 8px;
+        font-style: italic;
+      }
+      .suggestion-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex-shrink: 0;
+        margin-left: 8px;
+      }
+      .suggestion-count {
+        font-size: 0.8em;
+        color: #94a3b8;
+        transition: color 0.2s ease;
+      }
+      .suggestion-item:hover .suggestion-count, .suggestion-item.highlighted .suggestion-count {
+        color: #e2e8f0;
+      }
+
+      /* --- END OF MODIFIED STYLES --- */
+
       .nwpw-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
       .nwpw-switch input { opacity: 0; width: 0; height: 0; }
       .nwpw-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #1f2a3c; transition: .4s; border-radius: 24px; }
