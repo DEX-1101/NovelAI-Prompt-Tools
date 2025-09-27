@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         NovelAI Prompt Tools
 // @namespace    http://tampermonkey.net/
-// @version      4.0.5
-// @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting more easier with a real-time tag suggestion.
-// @author       x1101 (UI updated by your request)
+// @version      4.8.0
+// @description  A simple Tampermonkey userscript for NovelAI Image Generator that makes prompting easier with a real-time tag suggestion and prompt saving/restoring functionality.
+// @author       x1101
 // @match        https://novelai.net/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -14,15 +14,18 @@
 (function () {
   'use strict';
 
-  /* ---------------------- STORAGE (Weight Wrapper & Cache) ---------------------- */
+  /* ---------------------- STORAGE KEYS ---------------------- */
   const LS_KEY = 'nwpw_config_v3';
   const POS_KEY = 'nwpw_panel_pos';
+  const FLYOUT_POS_KEY = 'nwpw_flyout_pos';
   const FIRST_RUN_KEY = 'nwpw_first_run_v3.9';
   const LEGACY_KEY_V1 = 'nwpw_config_v1';
   const LEGACY_KEY_V2 = 'nwpw_config_v2';
-  // --- NEW --- Keys for caching tag data
+  // --- Caching for Tag Suggester ---
   const TAG_CACHE_KEY = 'nwpw_tag_data_cache';
   const ALIAS_CACHE_KEY = 'nwpw_alias_data_cache';
+  // --- Storage for saved prompts ---
+  const PROMPT_STORAGE_KEY = 'nwpw_prompt_preset_v1';
 
 
   const DEFAULTS = {
@@ -76,35 +79,152 @@
 
   let CONFIG = loadConfig();
 
+  /* ================================================================================= */
+  /* ---------------------- PROMPT SAVER CORE (MERGED FEATURE) ----------------------- */
+  /* ================================================================================= */
+
+    const PROMPT_SELECTORS = {
+        base: '.prompt-input-box-base-prompt .ProseMirror, .prompt-input-box-prompt .ProseMirror',
+        uc: '.prompt-input-box-undesired-content .ProseMirror',
+        char1: '.prompt-input-box-character-prompts-1 .ProseMirror',
+        char2: '.prompt-input-box-character-prompts-2 .ProseMirror',
+        char3: '.prompt-input-box-character-prompts-3 .ProseMirror',
+    };
+
+    function sleep() {
+        return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    }
+
+    function dispatchEvents(element) {
+        const inputEvent = new Event('input', { bubbles: true });
+        const blurEvent = new Event('blur', { bubbles: true });
+        element.dispatchEvent(inputEvent);
+        element.dispatchEvent(blurEvent);
+    }
+
+    async function savePrompts() {
+        console.log('[Prompt Tools] Saving prompts...');
+        const promptsToSave = {};
+        let fieldsFound = 0;
+
+        for (const key in PROMPT_SELECTORS) {
+            const element = document.querySelector(PROMPT_SELECTORS[key]);
+            if (element) {
+                promptsToSave[key] = element.innerText;
+                fieldsFound++;
+                console.log(`[Prompt Tools] Found and saved '${key}'.`);
+            }
+        }
+
+        if (fieldsFound > 0) {
+            await GM_setValue(PROMPT_STORAGE_KEY, promptsToSave);
+            showToast('Prompts Saved!');
+        } else {
+            showToast('Error: Could not find any prompt fields.');
+        }
+    }
+
+    // --- MODIFIED --- This now calls the preview window instead of directly restoring
+    async function restorePrompts() {
+        console.log('[Prompt Tools] Fetching prompts for preview...');
+        const savedPrompts = await GM_getValue(PROMPT_STORAGE_KEY, null);
+
+        if (!savedPrompts || Object.keys(savedPrompts).length === 0) {
+            showToast('No saved prompts found.');
+            return;
+        }
+
+        showRestorePreview(savedPrompts);
+    }
+
+    // --- ADDED --- This is the new function that actually applies the prompts to the page
+    async function applyPrompts(promptsToRestore) {
+        console.log('[Prompt Tools] Restoring prompts...');
+        for (const key of Object.keys(PROMPT_SELECTORS)) {
+            const element = document.querySelector(PROMPT_SELECTORS[key]);
+            if (element) {
+                const textToRestore = promptsToRestore[key] || '';
+                element.innerText = textToRestore;
+                dispatchEvents(element);
+                await sleep();
+            }
+        }
+        showToast('Prompts Restored!');
+    }
+
 
   /* ================================================================================= */
-  /* ---------------------- TAG SUGGESTER CORE (with Caching) ---------------------- */
+  /* ---------------------- TAG SUGGESTER CORE (PERFORMANCE UPDATE) ------------------ */
   /* ================================================================================= */
 
     const TAG_DATA_URL = 'https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/danbooru2026.csv';
     let allTags = [];
     let aliasMap = new Map();
+    let tagTrie = null;
     let autocompleteContext = null;
     let isAdjustingWeight = false;
+
+    class TrieNode {
+        constructor() {
+            this.children = {};
+            this.tags = [];
+        }
+    }
+
+    function buildTrie(tags, aliases) {
+        console.time('[Prompt Tools] Trie build time');
+        updateStatus('Building search index...', false, true);
+        const root = new TrieNode();
+        const tagObjects = new Map(tags.map(t => [t.text, t]));
+
+        for (const tag of tags) {
+            let node = root;
+            const text = tag.text.toLowerCase();
+            for (const char of text) {
+                if (!node.children[char]) {
+                    node.children[char] = new TrieNode();
+                }
+                node = node.children[char];
+            }
+            node.tags.push({ ...tag, source: tag.text });
+        }
+
+        for (const [alias, mainTagText] of aliases.entries()) {
+            const originalTag = tagObjects.get(mainTagText);
+            if (!originalTag) continue;
+
+            let node = root;
+            const aliasText = alias.toLowerCase();
+            for (const char of aliasText) {
+                if (!node.children[char]) {
+                    node.children[char] = new TrieNode();
+                }
+                node = node.children[char];
+            }
+            node.tags.push({ ...originalTag, source: alias, isAlias: true });
+        }
+        console.timeEnd('[Prompt Tools] Trie build time');
+        return root;
+    }
 
     function parseCsvLine(line) {
         const regex = /(".*?"|[^",]+)(?=\s*,|\s*$)/g;
         const matches = line.match(regex) || [];
         return matches.map(field => field.replace(/^"|"$/g, '').trim());
     }
-    // --- MODIFIED --- This function now uses GM_storage to avoid size limits and reports status to the UI
+
     async function loadTags() {
         updateStatus('Loading tags...', false, true);
         try {
             const cachedTags = await GM_getValue(TAG_CACHE_KEY);
             const cachedAliasesArray = await GM_getValue(ALIAS_CACHE_KEY);
 
-            // Try to load from GM storage first
             if (cachedTags && cachedAliasesArray) {
                 allTags = cachedTags;
-                aliasMap = new Map(cachedAliasesArray); // Reconstruct Map from array
+                aliasMap = new Map(cachedAliasesArray);
+                tagTrie = buildTrie(allTags, aliasMap);
                 updateStatus(`Loaded ${allTags.length} tags from cache.`);
-                return; // Success, no need to fetch
+                return;
             }
         } catch (e) {
             console.error('[Tag Suggester] Failed to parse cached tags. Clearing cache and fetching new data.', e);
@@ -153,9 +273,9 @@
                     if (aliasMap.has(tagText)) aliasMap.delete(tagText);
                 }
 
-                // --- MODIFIED --- Save the fetched data to GM storage
                 GM_setValue(TAG_CACHE_KEY, allTags);
                 GM_setValue(ALIAS_CACHE_KEY, Array.from(aliasMap.entries()));
+                tagTrie = buildTrie(allTags, aliasMap);
                 updateStatus(`Loaded and cached ${allTags.length} tags.`);
             },
             onerror: function(error) {
@@ -173,13 +293,13 @@
     let debounceTimer;
 
     function runAutocomplete(textArea) {
-        if (!CONFIG.enableTagSuggester) return;
+        if (!CONFIG.enableTagSuggester || !tagTrie) return;
         const isCE = textArea.isContentEditable;
         const text = isCE ? textArea.textContent : textArea.value;
         const sel = window.getSelection();
         if (isCE && sel.rangeCount === 0) return;
 
-        const [cursorPos, selectionEnd] = isCE
+        const [cursorPos, ] = isCE
             ? computeRangeOffsets(textArea, sel.getRangeAt(0))
             : [textArea.selectionStart, textArea.selectionEnd];
 
@@ -228,63 +348,55 @@
 
     function getSuggestions(query) {
         const queryLower = query.toLowerCase().replace(/ /g, '_');
-        const searchRegex = new RegExp(`^${queryLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
-        const seen = new Set();
-        const results = [];
+        if (!queryLower) return [];
 
-        for (const tag of allTags) {
-            if (searchRegex.test(tag.text.toLowerCase())) {
-                if (!seen.has(tag.text)) {
-                    results.push({ ...tag, source: tag.text });
-                    seen.add(tag.text);
+        let node = tagTrie;
+        for (const char of queryLower) {
+            if (!node.children[char]) return [];
+            node = node.children[char];
+        }
+
+        const results = [];
+        const seen = new Set();
+        const stack = [node];
+
+        while (stack.length > 0 && results.length < 10) {
+            const currentNode = stack.pop();
+
+            if (currentNode.tags.length > 0) {
+                for (const tag of currentNode.tags) {
+                    if (!seen.has(tag.text)) {
+                        results.push(tag);
+                        seen.add(tag.text);
+                    }
                 }
             }
+            const childrenKeys = Object.keys(currentNode.children).sort((a, b) => b.localeCompare(a));
+            for (const key of childrenKeys) {
+                stack.push(currentNode.children[key]);
+            }
         }
-        for (const [alias, correctTagText] of aliasMap.entries()) {
-             if (searchRegex.test(alias.toLowerCase())) {
-                 if (!seen.has(correctTagText)) {
-                     const originalTag = allTags.find(t => t.text === correctTagText);
-                     if (originalTag) {
-                         results.push({ ...originalTag, source: alias, isAlias: true });
-                         seen.add(correctTagText);
-                     }
-                 }
-             }
-        }
-        return results.slice(0, 10); // Changed to 10 to fit the new UI better
+        return results.slice(0, 10);
     }
 
-    // --- MODIFIED --- This function is completely revamped for the new UI
     function showSuggestions(suggestions, inputElement) {
-        suggestionContainer.innerHTML = ''; // Clear previous suggestions
+        suggestionContainer.innerHTML = '';
 
-        // Create header with only the close button
-        const header = document.createElement('div');
-        header.className = 'suggestion-header';
-        const closeBtn = document.createElement('button');
-        closeBtn.innerHTML = '✕';
-        closeBtn.onclick = hideSuggestions;
-        header.appendChild(closeBtn);
-        suggestionContainer.appendChild(header);
-
-        // Create grid for tags
         const grid = document.createElement('div');
         grid.className = 'suggestions-grid';
         suggestions.forEach(suggestion => grid.appendChild(createSuggestionItem(suggestion)));
         suggestionContainer.appendChild(grid);
 
-        // Positioning logic
         const rect = inputElement.getBoundingClientRect();
         suggestionContainer.style.left = `${rect.left + window.scrollX}px`;
         suggestionContainer.style.top = `${rect.bottom + window.scrollY + 5}px`;
-        suggestionContainer.style.width = `max-content`; // Adjust width to content
+        suggestionContainer.style.width = `max-content`;
         suggestionContainer.style.minWidth = `${rect.width}px`;
         suggestionContainer.style.display = 'block';
         suggestionContainer.classList.remove('slide-out');
         suggestionContainer.classList.add('slide-in');
     }
 
-    // --- MODIFIED --- This function is completely revamped for the new UI
     function createSuggestionItem(suggestion) {
         const item = document.createElement('div');
         item.className = 'suggestion-item';
@@ -293,7 +405,7 @@
         textContainer.className = 'suggestion-text-container';
 
         const suggestionText = document.createElement('span');
-        suggestionText.textContent = suggestion.isAlias ? suggestion.source : suggestion.text;
+        suggestionText.textContent = suggestion.source;
         textContainer.appendChild(suggestionText);
 
         if (suggestion.isAlias) {
@@ -317,7 +429,6 @@
 
         item.onclick = (e) => { e.stopPropagation(); selectSuggestion(suggestion); };
         item.onmouseover = () => {
-             // Find the correct index in the grid
             const gridItems = Array.from(suggestionContainer.querySelectorAll('.suggestion-item'));
             highlightedIndex = gridItems.indexOf(item);
             updateHighlight();
@@ -388,7 +499,6 @@
         const items = suggestionContainer.querySelectorAll('.suggestion-item');
         items.forEach((item, index) => {
             const isHighlighted = index === highlightedIndex;
-            // --- MODIFIED --- Use class for highlighting instead of direct style
             if (isHighlighted) {
                 item.classList.add('highlighted');
                 item.scrollIntoView({ block: 'nearest' });
@@ -402,7 +512,7 @@
   /* ================================================================================= */
   /* ---------------------- WEIGHT WRAPPER CORE ---------------------- */
   /* ================================================================================= */
-  const TAG_RE = /(\d+(?:\.\d+)?)(::?):([^:]+?)::/g;
+  const TAG_RE = /(\d+(?:\.\d+)?)::(.*?)::/g;
 
   function isBoundaryChar(ch) { return /[\s\n\r\t.,;:!?()\[\]{}"'`]/.test(ch); }
 
@@ -435,7 +545,7 @@
     TAG_RE.lastIndex = 0; let m;
     while ((m = TAG_RE.exec(text)) !== null) {
       if (start >= m.index && end <= TAG_RE.lastIndex) {
-        return { tagStart: m.index, tagEnd: TAG_RE.lastIndex, weight: parseFloat(m[1]), inner: m[3] };
+        return { tagStart: m.index, tagEnd: TAG_RE.lastIndex, weight: parseFloat(m[1]), inner: m[2] };
       }
     }
     return null;
@@ -445,7 +555,7 @@
     TAG_RE.lastIndex = 0; let m;
     while ((m = TAG_RE.exec(text)) !== null) {
       if (index > m.index && index < TAG_RE.lastIndex) {
-        return { tagStart: m.index, tagEnd: TAG_RE.lastIndex, weight: parseFloat(m[1]), inner: m[3] };
+        return { tagStart: m.index, tagEnd: TAG_RE.lastIndex, weight: parseFloat(m[1]), inner: m[2] };
       }
     }
     return null;
@@ -627,6 +737,12 @@
     });
 
   document.addEventListener('click', (event) => {
+      const flyout = document.getElementById('nwpw-flyout-container');
+      const preview = document.getElementById('nwpw-restore-preview');
+      if ((flyout && flyout.contains(event.target)) || (preview && preview.contains(event.target))) {
+          return;
+      }
+
       if (!suggestionContainer.contains(event.target) && event.target !== activeInput) {
           hideSuggestions();
       }
@@ -635,16 +751,15 @@
 
 
   /* ---------------------- UI (Panel, Buttons, etc.) ---------------------- */
-  let panel, gearBtn, overlayBtn, tooltipEl, toastEl, captureNotice, captureTimer = null;
+  let panel, gearBtn, tooltipEl, toastEl, captureNotice, captureTimer = null;
 
-  // --- NEW --- Function to display status messages in the UI
   function updateStatus(message, isError = false, isLoading = false) {
     const statusBar = document.getElementById('nwpw-status-bar');
     if (statusBar) {
         let content = '';
         if (isLoading) {
             content = `<div style="display:flex; align-items:center; gap: 6px;">
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="animation: nwpw-spin 1s linear infinite;"><path d="M8 1.5A6.5 6.5 0 1 0 8 14.5A6.5 6.5 0 1 0 8 1.5Z" stroke="currentColor" stroke-opacity="0.25" stroke-width="3"/><path d="M8 1.5A6.5 6.5 0 1 1 1.5 8" stroke="currentColor" stroke-width="3"/></svg>
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg" style="animation: nwpw-spin 1s linear infinite;"><path d="M8 1.5A6.5 6.5 0 1 0 8 14.5A6.5 6.5 0 1 0 8 15Z" stroke="currentColor" stroke-opacity="0.25" stroke-width="3"/><path d="M8 1.5A6.5 6.5 0 1 1 1.5 8" stroke="currentColor" stroke-width="3"/></svg>
                 <span>${message}</span>
             </div>`;
         } else {
@@ -665,26 +780,78 @@
       }
       @keyframes nwpw-pop { from { opacity:0; transform: translateY(8px) scale(.98); } to { opacity:1; transform: translateY(0) scale(1); } }
       @keyframes nwpw-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-      #nwpw-gear, #nwpw-overlay-btn { z-index: 2147483645; }
-      #nwpw-gear {
-        position: fixed; right: 18px; bottom: 18px; width: auto; height: auto; padding: 8px 14px;
-        border-radius: 2px; display: flex; align-items: center; gap: 8px; font-size: 14px;
-        background: var(--card); color: var(--text); border: 1px solid var(--border);
-        box-shadow: var(--shadow); cursor: pointer; user-select: none;
-        transition: transform .15s ease, background .2s ease, border-color .2s ease, box-shadow .2s ease;
+
+      /* --- Draggable Flyout SVG Button Styles --- */
+      #nwpw-flyout-container {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 2147483645;
+        display: flex;
+        align-items: center;
+        background-color: rgba(28, 28, 30, 0.85);
+        border: 1px solid rgba(80, 80, 80, 0.5);
+        border-radius: 8px;
+        padding: 5px;
+        backdrop-filter: blur(8px);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        transition: all 0.2s ease-in-out;
       }
-      #nwpw-gear:hover {
-        transform: translateY(-1px); border-color: var(--accent);
-        background: linear-gradient(45deg, var(--accent), var(--accent-2));
-        box-shadow: 0 0 15px rgba(79, 70, 229, 0.5);
+      #nwpw-main-trigger {
+        cursor: grab;
       }
-      #nwpw-overlay-btn {
-        position: fixed; right: 18px; top: 18px; padding: 8px 12px; border-radius: 2px;
-        background: linear-gradient(180deg,#1e293b,#0f172a); color: var(--text);
-        border: 1px solid #334155; box-shadow: var(--shadow); font-size: 13px; cursor: pointer; user-select: none;
-        transition: transform .15s ease, filter .2s ease, background .2s ease, border-color .2s ease;
+      #nwpw-main-trigger:active {
+        cursor: grabbing;
       }
-      #nwpw-overlay-btn:hover { transform: translateY(-1px); filter: brightness(1.05); }
+      .nwpw-bar-btn {
+        width: 38px;
+        height: 38px;
+        padding: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: transparent;
+        color: var(--text);
+        border: 1px solid transparent;
+        border-radius: 6px;
+        cursor: pointer;
+        user-select: none;
+        transition: background-color .2s ease, border-color .2s ease;
+      }
+      .nwpw-bar-btn:hover {
+        background-color: rgba(255, 255, 255, 0.1);
+        border-color: rgba(255, 255, 255, 0.15);
+      }
+      .nwpw-bar-btn svg {
+        width: 22px;
+        height: 22px;
+        stroke: currentColor;
+        fill: none;
+        stroke-width: 1.5;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        display: block;
+      }
+      .nwpw-flyout-item {
+        width: 0;
+        opacity: 0;
+        padding: 0;
+        margin-right: 0;
+        transform: translateX(10px);
+        pointer-events: none;
+        transition: width 0.2s ease, opacity 0.15s ease, transform 0.2s ease, margin-right 0.2s ease;
+      }
+      #nwpw-flyout-container:hover .nwpw-flyout-item {
+        width: 38px;
+        opacity: 1;
+        margin-right: 4px;
+        transform: translateX(0);
+        pointer-events: auto;
+      }
+      #nwpw-flyout-container:hover .nwpw-flyout-item:nth-child(1) { transition-delay: 0.1s; }
+      #nwpw-flyout-container:hover .nwpw-flyout-item:nth-child(2) { transition-delay: 0.05s; }
+      #nwpw-flyout-container:hover .nwpw-flyout-item:nth-child(3) { transition-delay: 0s; }
+
       #nwpw-panel {
         position: fixed; min-width: 380px; max-width: 540px;
         background: linear-gradient(180deg, var(--bg), var(--bg-2)); color: var(--text);
@@ -717,7 +884,12 @@
       #nwpw-panel .drag-hint { font-size:11px; color: var(--muted); opacity:.7 }
       #nwpw-close { background: transparent; border: none; font-size: 18px; color:#aab0bb; cursor:pointer; padding:2px 6px; transition: color .15s ease; }
       #nwpw-close:hover { color: #fff; }
-      #nwpw-capture-notice, #nwpw-toast { position: fixed; right: 20px; bottom: 72px; min-width: 140px; background: #0f172a; color:#e5e7eb; border:1px solid #1f2a3c; border-radius: 2px; padding: 8px 12px; box-shadow: var(--shadow); z-index: 2147483647; display:none; animation: nwpw-pop .18s ease both; }
+      #nwpw-capture-notice, #nwpw-toast {
+        position: fixed; min-width: 140px; background: #0f172a; color:#e5e7eb;
+        border:1px solid #1f2a3c; border-radius: 2px; padding: 8px 12px;
+        box-shadow: var(--shadow); z-index: 2147483647; display:none;
+        animation: nwpw-pop .18s ease both; text-align: center;
+      }
       #nwpw-tooltip { position: fixed; pointer-events: none; background: #111827; color:#e5e7eb; border:1px solid #1f2a3c; border-radius: 2px; padding: 6px 8px; font-size: 12px; z-index: 2147483647; display:none; filter: drop-shadow(0 6px 20px rgba(0,0,0,.45)); }
       .inline { display:flex; gap:8px; align-items:center; }
       .hint { color: var(--muted); font-size: 11px; }
@@ -727,7 +899,6 @@
       .slide-in { animation: slideIn 0.2s ease-out forwards; }
       .slide-out { animation: slideOut 0.2s ease-in forwards; }
 
-      /* --- MODIFIED --- All styles below are new or changed for the suggestion UI */
       #tag-suggestions-container {
         position: absolute; z-index: 10000;
         background-color: #19202c;
@@ -740,30 +911,10 @@
         padding: 8px;
         overflow: hidden;
       }
-      .suggestion-header {
-        display: flex;
-        justify-content: flex-end;
-        align-items: center;
-        padding: 0px 8px 8px 8px;
-        height: 24px;
-      }
-      .suggestion-header button {
-        background: none;
-        border: none;
-        color: #94a3b8;
-        font-size: 20px;
-        cursor: pointer;
-        line-height: 1;
-        padding: 0 4px;
-        transition: color 0.2s ease;
-      }
-      .suggestion-header button:hover {
-        color: #e2e8f0;
-      }
       .suggestions-grid {
         display: grid;
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
+        grid-template-columns: auto auto;
+        gap: 6px;
       }
       .suggestion-item {
         display: flex;
@@ -810,9 +961,6 @@
       .suggestion-item:hover .suggestion-count, .suggestion-item.highlighted .suggestion-count {
         color: #e2e8f0;
       }
-
-      /* --- END OF MODIFIED STYLES --- */
-
       .nwpw-switch { position: relative; display: inline-block; width: 44px; height: 24px; }
       .nwpw-switch input { opacity: 0; width: 0; height: 0; }
       .nwpw-slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #1f2a3c; transition: .4s; border-radius: 24px; }
@@ -828,15 +976,65 @@
         0%, 20%, 50%, 80%, 100% { transform: translateY(0); } 40% { transform: translateY(-10px); } 60% { transform: translateY(-5px); }
       }
       .nwpw-attention { animation: nwpw-glow 2.5s infinite, nwpw-bounce 2s infinite; border-color: var(--accent-2) !important; }
-      #nwpw-welcome-popup { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: var(--card); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 24px; box-shadow: var(--shadow); z-index: 2147483647; text-align: center; animation: nwpw-pop .2s ease-out; }
-      #nwpw-welcome-popup h3 { margin: 0 0 12px; font-size: 18px; }
-      #nwpw-welcome-popup p { margin: 0 0 20px; color: var(--muted); max-width: 350px; }
-      #nwpw-welcome-popup .popup-btns button { padding: 7px 12px; border-radius: 2px; border: 1px solid var(--border); background:#0e1626; color:var(--text); cursor:pointer; transition: transform .12s ease, border-color .15s ease, background .15s ease; margin: 0 5px; }
-      #nwpw-welcome-popup .popup-btns button:hover { transform: translateY(-1px); border-color:#334155; background:#101b30; }
-      #nwpw-welcome-popup .popup-btns button.primary { background: linear-gradient(180deg, #3b82f6, #2563eb); border-color: #1d4ed8; }
-      #nwpw-welcome-popup .popup-btns button.primary:hover { background: linear-gradient(180deg, #60a5fa, #3b82f6); border-color:#2563eb; }
-      #nwpw-github-link { display: inline-flex; align-items: center; gap: 8px; margin-top: 16px; text-decoration: none; color: var(--muted); transition: color .2s ease; }
-      #nwpw-github-link:hover { color: var(--text); }
+
+      /* --- ADDED --- Styles for the new restore preview window --- */
+      @keyframes nwpw-slide-in-right {
+        from { opacity: 0; transform: translate(-50%, -50%) translateX(20px); }
+        to { opacity: 1; transform: translate(-50%, -50%) translateX(0); }
+      }
+      @keyframes nwpw-fade-out-left {
+        from { opacity: 1; transform: translate(-50%, -50%) translateX(0); }
+        to { opacity: 0; transform: translate(-50%, -50%) translateX(-20px); }
+      }
+      #nwpw-restore-preview {
+        position: fixed;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        width: 400px;
+        max-width: 90vw;
+        max-height: 80vh;
+        background-color: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        box-shadow: var(--shadow);
+        z-index: 2147483647;
+        color: var(--text);
+        display: flex;
+        flex-direction: column;
+      }
+      #nwpw-restore-preview.nwpw-slide-in-right { animation: nwpw-slide-in-right 0.2s ease-out forwards; }
+      #nwpw-restore-preview.nwpw-fade-out-left { animation: nwpw-fade-out-left 0.2s ease-in forwards; }
+      #nwpw-restore-preview h3 {
+        margin: 0; padding: 12px 16px; font-size: 16px;
+        border-bottom: 1px solid var(--border);
+      }
+      #nwpw-restore-preview .preview-content-area {
+        padding: 16px;
+        overflow-y: auto;
+        flex-grow: 1;
+      }
+      #nwpw-restore-preview .preview-item { margin-bottom: 12px; }
+      #nwpw-restore-preview .preview-label {
+        font-size: 12px; color: var(--muted); margin-bottom: 4px;
+        text-transform: capitalize;
+      }
+      #nwpw-restore-preview .preview-prompt {
+        font-size: 13px; background-color: var(--bg-2); padding: 8px;
+        border-radius: 2px; word-break: break-word;
+      }
+      #nwpw-restore-preview .preview-buttons {
+        display: flex; justify-content: flex-end; gap: 10px;
+        padding: 12px 16px;
+        border-top: 1px solid var(--border);
+      }
+      /* Use same button styles from settings panel */
+      #nwpw-restore-preview .preview-buttons button {
+        padding: 7px 12px; border-radius: 2px; border: 1px solid var(--border);
+        background:#0e1626; color:var(--text); cursor:pointer; transition: transform .12s ease, border-color .15s ease, background .15s ease;
+      }
+      #nwpw-restore-preview .preview-buttons button:hover { transform: translateY(-1px); border-color:#334155; background:#101b30; }
+      #nwpw-restore-preview .preview-buttons button.primary { background: linear-gradient(180deg, #3b82f6, #2563eb); border-color: #1d4ed8; }
+      #nwpw-restore-preview .preview-buttons button.primary:hover { background: linear-gradient(180deg, #60a5fa, #3b82f6); border-color:#2563eb; }
     `;
     const style = document.createElement('style');
     style.id = 'nwpw-style';
@@ -845,27 +1043,8 @@
   }
 
   function showFirstRunPopup() {
-    const popup = document.createElement('div');
-    popup.id = 'nwpw-welcome-popup';
-    popup.innerHTML = `
-      <h3>Welcome!</h3>
-      <p>The Prompt Tools script has been installed. You can find the settings button on the bottom right corner of the page.</p>
-      <div class="popup-btns">
-        <button id="nwpw-popup-ok" class="primary">OK</button>
-      </div>
-      <a href="https://github.com/DEX-1101/NovelAI-Prompt-Weight-Wrapper" target="_blank" id="nwpw-github-link">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
-          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
-        </svg>
-        <span>View on GitHub</span>
-      </a>
-    `;
-    document.body.appendChild(popup);
-    const closePopup = () => { gearBtn.classList.remove('nwpw-attention'); popup.remove(); };
-    popup.querySelector('#nwpw-popup-ok').addEventListener('click', closePopup);
-    gearBtn.classList.add('nwpw-attention');
+    // This popup is now superseded by the restore preview, but kept for completeness.
   }
-
 
   function ensureTooltip() {
     if (tooltipEl) return;
@@ -895,14 +1074,52 @@
     toastEl.style.zIndex = '2147483647';
     document.body.appendChild(toastEl);
   }
+
   function showToast(msg, ms = 2000) {
-    ensureToast(); toastEl.textContent = msg; toastEl.style.display = 'block';
+    ensureToast();
+    toastEl.textContent = msg;
+
+    toastEl.style.visibility = 'hidden';
+    toastEl.style.display = 'block';
+
+    const flyout = document.getElementById('nwpw-flyout-container');
+    if (flyout) {
+        const flyoutRect = flyout.getBoundingClientRect();
+        const toastRect = toastEl.getBoundingClientRect();
+
+        const top = flyoutRect.top - toastRect.height - 10;
+        const left = flyoutRect.left + (flyoutRect.width / 2) - (toastRect.width / 2);
+
+        toastEl.style.top = `${top}px`;
+        toastEl.style.left = `${left}px`;
+        toastEl.style.right = 'auto';
+        toastEl.style.bottom = 'auto';
+    } else {
+        toastEl.style.bottom = '72px';
+        toastEl.style.right = '20px';
+    }
+
+    toastEl.style.visibility = 'visible';
+
     setTimeout(() => { toastEl.style.display = 'none'; }, ms);
   }
+
   function showCaptureNotice(msg) {
     if (!captureNotice) { captureNotice = document.createElement('div'); captureNotice.id = 'nwpw-capture-notice'; captureNotice.style.zIndex = '2147483647'; document.body.appendChild(captureNotice); }
     bringTooltipToFront();
-    captureNotice.textContent = msg; captureNotice.style.display = 'block';
+    captureNotice.textContent = msg;
+    const panelEl = document.getElementById('nwpw-panel');
+    if (panelEl && panelEl.style.display !== 'none') {
+        const panelRect = panelEl.getBoundingClientRect();
+        captureNotice.style.top = `${panelRect.bottom + 10}px`;
+        captureNotice.style.left = `${panelRect.left}px`;
+        captureNotice.style.right = 'auto';
+        captureNotice.style.bottom = 'auto';
+    } else {
+        captureNotice.style.bottom = '72px';
+        captureNotice.style.right = '20px';
+    }
+    captureNotice.style.display = 'block';
   }
   function hideCaptureNotice() { if (captureNotice) captureNotice.style.display = 'none'; }
 
@@ -928,16 +1145,146 @@
     if (captureTimer) { clearTimeout(captureTimer); captureTimer = null; }
   }
 
-  function createGearButton() {
-    if (document.getElementById('nwpw-gear')) return;
-    gearBtn = document.createElement('button');
-    gearBtn.id = 'nwpw-gear';
-    gearBtn.setAttribute('aria-label', 'Prompt Weight Wrapper Settings');
-    gearBtn.innerHTML = '<span>⚙️</span><span>Settings</span>';
-    gearBtn.addEventListener('click', toggleUI, { passive: true });
-    document.body.appendChild(gearBtn);
-    bindTooltip(gearBtn, 'Open Settings. (Default shortcut: Ctrl+;)');
-  }
+    // --- ADDED --- Functions to show and hide the new restore preview window
+    function hideRestorePreview() {
+        const previewEl = document.getElementById('nwpw-restore-preview');
+        if (previewEl) {
+            previewEl.classList.remove('nwpw-slide-in-right');
+            previewEl.classList.add('nwpw-fade-out-left');
+            setTimeout(() => previewEl.remove(), 200);
+        }
+    }
+
+    function showRestorePreview(savedPrompts) {
+        // Remove any existing preview
+        hideRestorePreview();
+
+        const previewEl = document.createElement('div');
+        previewEl.id = 'nwpw-restore-preview';
+
+        let contentHTML = '';
+        const fieldNames = { base: 'Base Prompt', uc: 'Undesired Content', char1: 'Character 1', char2: 'Character 2', char3: 'Character 3' };
+        for (const key in savedPrompts) {
+            if (savedPrompts[key]) {
+                contentHTML += `
+                    <div class="preview-item">
+                        <div class="preview-label">${fieldNames[key] || key}</div>
+                        <div class="preview-prompt">${savedPrompts[key]}</div>
+                    </div>`;
+            }
+        }
+
+        previewEl.innerHTML = `
+            <h3>Restore Prompts</h3>
+            <div class="preview-content-area">${contentHTML}</div>
+            <div class="preview-buttons">
+                <button id="nwpw-preview-cancel">Cancel</button>
+                <button id="nwpw-preview-ok" class="primary">Restore</button>
+            </div>
+        `;
+
+        document.body.appendChild(previewEl);
+
+        previewEl.querySelector('#nwpw-preview-ok').addEventListener('click', () => {
+            applyPrompts(savedPrompts);
+            hideRestorePreview();
+        });
+
+        previewEl.querySelector('#nwpw-preview-cancel').addEventListener('click', hideRestorePreview);
+
+        requestAnimationFrame(() => {
+             previewEl.classList.add('nwpw-slide-in-right');
+        });
+    }
+
+    function createMainButtons() {
+        if (document.getElementById('nwpw-flyout-container')) return;
+
+        const ICONS = {
+            save: `<svg viewBox="0 0 24 24"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2-2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>`,
+            restore: `<svg viewBox="0 0 24 24"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.3"/></svg>`,
+            settings: `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>`,
+            // --- MODIFIED --- Wrapped the path in a group <g> and translated it to the left by 1px to fix optical alignment.
+            tools: `<svg viewBox="0 0 24 24"><g transform="translate(-3, 0)"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path></g></svg>`
+        };
+
+        const container = document.createElement('div');
+        container.id = 'nwpw-flyout-container';
+
+        gearBtn = document.createElement('button');
+        gearBtn.id = 'nwpw-settings-btn';
+        gearBtn.className = 'nwpw-bar-btn nwpw-flyout-item';
+        gearBtn.innerHTML = ICONS.settings;
+        gearBtn.addEventListener('click', toggleUI);
+        bindTooltip(gearBtn, 'Open Settings Panel (Ctrl+;)');
+
+        const restoreBtn = document.createElement('button');
+        restoreBtn.id = 'nwpw-restore-prompts';
+        restoreBtn.className = 'nwpw-bar-btn nwpw-flyout-item';
+        restoreBtn.innerHTML = ICONS.restore;
+        restoreBtn.addEventListener('click', restorePrompts);
+        bindTooltip(restoreBtn, 'Restore previously saved prompts.');
+
+        const saveBtn = document.createElement('button');
+        saveBtn.id = 'nwpw-save-prompts';
+        saveBtn.className = 'nwpw-bar-btn nwpw-flyout-item';
+        saveBtn.innerHTML = ICONS.save;
+        saveBtn.addEventListener('click', savePrompts);
+        bindTooltip(saveBtn, 'Save all current prompts.');
+
+        const triggerBtn = document.createElement('button');
+        triggerBtn.id = 'nwpw-main-trigger';
+        triggerBtn.className = 'nwpw-bar-btn';
+        triggerBtn.innerHTML = ICONS.tools;
+        bindTooltip(triggerBtn, 'Prompt Tools');
+
+        container.appendChild(gearBtn);
+        container.appendChild(restoreBtn);
+        container.appendChild(saveBtn);
+        container.appendChild(triggerBtn);
+
+        document.body.appendChild(container);
+
+        try {
+            const savedPos = JSON.parse(localStorage.getItem(FLYOUT_POS_KEY));
+            if (savedPos && typeof savedPos.right === 'number' && typeof savedPos.bottom === 'number') {
+                container.style.right = `${savedPos.right}px`;
+                container.style.bottom = `${savedPos.bottom}px`;
+            }
+        } catch {}
+
+        let isDragging = false, startX, startY, startRight, startBottom;
+        triggerBtn.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            const rect = container.getBoundingClientRect();
+            startRight = window.innerWidth - rect.right;
+            startBottom = window.innerHeight - rect.bottom;
+            container.style.transition = 'none';
+            e.preventDefault();
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (!isDragging) return;
+            const dx = e.clientX - startX;
+            const dy = e.clientY - startY;
+            container.style.right = `${startRight - dx}px`;
+            container.style.bottom = `${startBottom - dy}px`;
+        });
+
+        document.addEventListener('mouseup', () => {
+            if (!isDragging) return;
+            isDragging = false;
+            container.style.transition = '';
+            const finalRect = container.getBoundingClientRect();
+            const posToSave = {
+                right: window.innerWidth - finalRect.right,
+                bottom: window.innerHeight - finalRect.bottom
+            };
+            localStorage.setItem(FLYOUT_POS_KEY, JSON.stringify(posToSave));
+        });
+    }
 
   function createUI() {
     if (document.getElementById('nwpw-panel')) return;
@@ -1055,10 +1402,10 @@
       panel.remove(); panel = null; createUI(); openUI(); showToast('Defaults restored');
     });
 
-    // --- MODIFIED --- Event listener for clearing tag cache from GM storage
     panel.querySelector('#nwpw-clear-tags').addEventListener('click', async () => {
         await GM_deleteValue(TAG_CACHE_KEY);
         await GM_deleteValue(ALIAS_CACHE_KEY);
+        tagTrie = null; // Clear the index
         showToast('Tag cache cleared. Reload the page to fetch new tags.');
     });
 
@@ -1095,15 +1442,15 @@
   // Init
   function init() {
     injectStyles();
-    createGearButton();
+    createMainButtons();
     createUI();
-    loadTags(); // --- MODIFIED --- Call the new caching-aware function
+    loadTags();
     document.body.appendChild(suggestionContainer);
 
     const isFirstRun = localStorage.getItem(FIRST_RUN_KEY) === null;
     if (isFirstRun) {
         setTimeout(() => {
-            showFirstRunPopup();
+            // The first run popup is no longer necessary as the main UI is self-discoverable.
             localStorage.setItem(FIRST_RUN_KEY, 'false');
         }, 1000);
     }
@@ -1111,4 +1458,3 @@
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init, { once: true }); else init();
 
 })();
-
