@@ -14,7 +14,7 @@ A simple yet powerful Tampermonkey userscript designed to supercharge your promp
 
 -   **⚙️ Fully Customizable:** Easily change the hotkeys and weight adjustment values through a clean and simple settings menu to perfectly match your workflow.
 
-    ![Customizing hotkeys and settings](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/setting.gif)
+    ![Customizing hotkeys and settings](https://raw.githubusercontent.com/DEX-1101/NovelAI-Prompt-Tools/refs/heads/main/sample/ui.gif)
 
 ---
 
